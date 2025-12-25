@@ -7,6 +7,8 @@
 # - Writes one output file per partition (named by device + mount)
 # - Overwrites files each run; then: git add -A; commit; push -u origin main
 # - Optional: --paths=PATHS (comma-separated, repeatable) to scan only specific mountpoints
+# - Commit message: "DD-MMM-YYYY HH:mm" (e.g. "10-Jan-2025 16:25")
+# - Maintains per-host instance id INSIDE THIS SCRIPT (self-modifying)
 #
 # Example cron:
 #   10 3 * * * /path/to/partition_snapshot_git.sh --repo=/srv/tree-repo --email=you@domain.com
@@ -37,6 +39,7 @@ Output format per line (pipe-separated):
 Notes:
   - Uses `find -xdev` so scans never descend into other mounted filesystems.
   - Scans mountpoints (/, /data, /boot, etc.), not raw block devices.
+  - Script must be writable by the running user (self-edit to persist instance id).
 EOF
 }
 
@@ -54,6 +57,12 @@ REPO=""
 HEARTBEAT_URL=""
 NOTIFICATION_URL=""
 SCAN_PATHS=() # optional filter list (mountpoints)
+
+# -----------------------------
+# BEGIN_INSTANCE
+INSTANCE_ID=""
+# END_INSTANCE
+# -----------------------------
 
 # --- Arg parsing ---
 for arg in "$@"; do
@@ -222,6 +231,83 @@ should_scan_mount() {
 	return 1
 }
 
+generate_instance_id_5digits() {
+	local num=""
+
+	if [[ -r /dev/urandom ]]; then
+		require_cmd od || {
+			printf "%05d\n" "$((RANDOM % 100000))"
+			return 0
+		}
+		require_cmd tr || {
+			printf "%05d\n" "$((RANDOM % 100000))"
+			return 0
+		}
+		require_cmd awk || {
+			printf "%05d\n" "$((RANDOM % 100000))"
+			return 0
+		}
+
+		num="$(od -An -N2 -tu2 /dev/urandom | tr -d ' ' | awk '{print $1 % 100000}')"
+	else
+		num="$((RANDOM % 100000))"
+	fi
+
+	printf "%05d" "$num"
+}
+
+save_instance_into_script() {
+	require_cmd mktemp || return 1
+	require_cmd sed || return 1
+	require_cmd mv || return 1
+
+	# Persist INSTANCE_ID inside the script
+	local script="${BASH_SOURCE[0]}"
+	local tmp script_dir
+
+	script_dir="$(dirname -- "$script")"
+	tmp="$(mktemp -- "${script_dir}/.script_instance_tmp.XXXXXX")" || return 1
+
+	# Before BEGIN_INSTANCE (excluding the BEGIN_INSTANCE line itself)
+	sed -n '1,/^# BEGIN_INSTANCE$/p' "$script" | sed '$d' >"$tmp"
+
+	{
+		echo "# BEGIN_INSTANCE"
+		printf 'INSTANCE_ID=%q\n' "$INSTANCE_ID"
+		echo "# END_INSTANCE"
+	} >>"$tmp"
+
+	# After END_INSTANCE (excluding the END_INSTANCE line itself)
+	sed -n '/^# END_INSTANCE$/,$p' "$script" | sed '1d' >>"$tmp"
+
+	mv -- "$tmp" "$script"
+}
+
+ensure_instance_id() {
+	# Initialize only once; keep stable thereafter (stored in this script).
+	if [[ -n "${INSTANCE_ID:-}" ]]; then
+		return 0
+	fi
+
+	INSTANCE_ID="$(generate_instance_id_5digits)"
+	log "Initialized INSTANCE_ID=$INSTANCE_ID (persisting into script)"
+
+	# Best-effort persist; if it fails, we still proceed (but would re-init next run).
+	if ! save_instance_into_script; then
+		local msg="ERROR: Failed to persist INSTANCE_ID into script. Ensure the script is writable."
+		log "$msg"
+		notify_webhook "$msg"
+		sendemail "$(hostname): partition snapshot WARNING" "$msg"
+	fi
+}
+
+host_instance_folder() {
+	local h
+	h="$(hostname -s 2>/dev/null || hostname)"
+	h="$(safe_name "$h")"
+	echo "${h}-${INSTANCE_ID}"
+}
+
 run_find_for_mount() {
 	local dev="$1"
 	local mp="$2"
@@ -311,8 +397,17 @@ main() {
 	require_cmd find || die "find is required"
 	require_cmd git || die "git is required"
 
-	# Prepare output directory inside repo
-	local outdir="${REPO%/}"
+	if [[ ! -d "$REPO" ]]; then
+		die "--repo does not exist or is not a directory: $REPO"
+	fi
+
+	# Ensure stable instance id exists (self-modifying)
+	ensure_instance_id
+
+	# Output directory in repo: <hostname>-<id>/
+	local folder
+	folder="$(host_instance_folder)"
+	local outdir="${REPO%/}/${folder}"
 	mkdir -p "$outdir"
 
 	# Discover mounted partitions
@@ -348,6 +443,7 @@ main() {
 	done <<<"$mounts"
 
 	log "Scan complete: scanned=$scanned skipped=$skipped"
+	log "Output directory: $outdir"
 
 	# Commit + push
 	if ! git_commit_and_push "$REPO"; then
