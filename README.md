@@ -223,7 +223,7 @@ Replace in the code below
 02. `<NOTIFICATION URL>` with your notification URL, on which you want notification alerts. it can be something like `http://ntfy.sh/<TOPIC-NAME-HERE>`
 03. `<HEARTBEAT URL>` with your heartbeat URL, this can be a URL of uptime kuma or other uptime checkers.
 ```cron
-10 0 1 * * bin/bash /usr/local/sbin/partition_snapshot_git.sh --repo=/mnt/backup-store/partition-snapshot-git-data --email=<EMAIL.GOES.HERE@PROVIDER.COM> --notification-url="<NOTIFICATION URL>" --heartbeat-url="<HEARTBEAT URL>"
+10 0 1 * * /bin/bash /usr/local/sbin/partition_snapshot_git.sh --repo=/mnt/backup-store/partition-snapshot-git-data --email=<EMAIL.GOES.HERE@PROVIDER.COM> --notification-url="<NOTIFICATION URL>" --heartbeat-url="<HEARTBEAT URL>"
 ```
 
 ---
